@@ -1,6 +1,6 @@
 # homelab-devops
 
-![CI/CD](https://github.com/YOUR-GITHUB-USER/homelab-devops/actions/workflows/ci-cd.yml/badge.svg)
+![CI/CD](https://github.com/daria-sobko-dev/homelab-devops/actions/workflows/ci-cd.yml/badge.svg)
 
 A production-style self-hosted platform on a single cloud server, built end to end:
 **Terraform → hardened Ubuntu → Traefik with automatic TLS → WireGuard VPN → Dockerized services → Prometheus/Grafana monitoring → CI/CD with GitHub Actions**.
