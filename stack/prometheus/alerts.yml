@@ -1,0 +1,55 @@
+# Alert rules are visible at Prometheus -> Alerts (and in Grafana).
+# Next step: add Alertmanager to send them to Telegram/Slack/email.
+groups:
+  - name: homelab
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scrape target {{ $labels.job }} is down"
+
+      - alert: HostHighCpu
+        expr: 100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU usage above 90% for 10 minutes"
+
+      - alert: HostHighMemory
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory usage above 90%"
+
+      - alert: HostDiskAlmostFull
+        expr: >
+          (1 - node_filesystem_avail_bytes{mountpoint="/"}
+             / node_filesystem_size_bytes{mountpoint="/"}) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Root filesystem is {{ $value | printf \"%.0f\" }}% full"
+
+      - alert: AppHighErrorRate
+        expr: >
+          sum(rate(app_requests_total{status=~"5.."}[5m]))
+            / sum(rate(app_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 5% of app requests return 5xx"
+
+      - alert: TlsCertificateExpiringSoon
+        expr: min by (cn) ((traefik_tls_certs_not_after - time()) / 86400) < 14
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate for {{ $labels.cn }} expires in less than 14 days"

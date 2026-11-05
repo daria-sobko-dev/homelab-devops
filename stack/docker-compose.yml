@@ -1,0 +1,229 @@
+name: homelab
+
+# Every service logs to json-file with rotation, so logs can't fill the disk.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+networks:
+  # Services reachable through Traefik.
+  proxy:
+    name: proxy
+  # Internal network for metrics. Nothing here is published to the internet.
+  monitoring:
+    name: monitoring
+
+volumes:
+  letsencrypt:
+  wg-data:
+  uptime-kuma-data:
+  prometheus-data:
+  grafana-data:
+
+services:
+  # --- Edge: reverse proxy + automatic TLS ------------------------------------
+  traefik:
+    image: traefik:v3.2
+    container_name: traefik
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=proxy
+      # HTTP -> HTTPS redirect
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      # HTTPS with Let's Encrypt certificates for every router
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls.certresolver=letsencrypt
+      - --entrypoints.websecure.http.middlewares=security-headers@docker
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:?set ACME_EMAIL in .env}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.letsencrypt.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
+      # Dashboard, health check and metrics
+      - --api.dashboard=true
+      - --ping=true
+      - --entrypoints.metrics.address=:8082
+      - --metrics.prometheus=true
+      - --metrics.prometheus.entrypoint=metrics
+      - --log.level=${TRAEFIK_LOG_LEVEL:-INFO}
+      - --accesslog=true
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Read-only Docker socket for service discovery.
+      # Hardening idea: put a docker-socket-proxy in front of it.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+      - ./traefik/users.htpasswd:/etc/traefik/users.htpasswd:ro
+    networks:
+      - proxy
+      - monitoring
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    labels:
+      - traefik.enable=true
+      # Dashboard at https://traefik.<DOMAIN>, protected by basic auth
+      - traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN:?set DOMAIN in .env}`)
+      - traefik.http.routers.dashboard.entrypoints=websecure
+      - traefik.http.routers.dashboard.service=api@internal
+      - traefik.http.routers.dashboard.middlewares=admin-auth
+      - traefik.http.middlewares.admin-auth.basicauth.usersfile=/etc/traefik/users.htpasswd
+      # Security headers applied to every HTTPS response
+      - traefik.http.middlewares.security-headers.headers.stsSeconds=31536000
+      - traefik.http.middlewares.security-headers.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.security-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.security-headers.headers.frameDeny=true
+      - traefik.http.middlewares.security-headers.headers.referrerPolicy=strict-origin-when-cross-origin
+
+  # --- Demo application (built and pushed by GitHub Actions) ---------------------
+  app:
+    image: ${APP_IMAGE:-ghcr.io/your-github-user/homelab-app:latest}
+    container_name: app
+    restart: unless-stopped
+    logging: *default-logging
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - proxy
+      - monitoring
+    labels:
+      - traefik.enable=true
+      # /metrics is only for Prometheus on the internal network, not the internet.
+      - traefik.http.routers.app.rule=Host(`app.${DOMAIN}`) && !Path(`/metrics`)
+      - traefik.http.routers.app.entrypoints=websecure
+      - traefik.http.services.app.loadbalancer.server.port=8000
+
+  # --- VPN: WireGuard with a web UI ------------------------------------------------
+  wg-easy:
+    image: ghcr.io/wg-easy/wg-easy:14
+    container_name: wg-easy
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      WG_HOST: ${WG_HOST:?set WG_HOST in .env}
+      PASSWORD_HASH: ${WG_PASSWORD_HASH:?set WG_PASSWORD_HASH in .env}
+      WG_DEFAULT_DNS: 1.1.1.1
+      UI_TRAFFIC_STATS: "true"
+    volumes:
+      - wg-data:/etc/wireguard
+    ports:
+      - "51820:51820/udp"
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    networks:
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.vpn.rule=Host(`vpn.${DOMAIN}`)
+      - traefik.http.routers.vpn.entrypoints=websecure
+      - traefik.http.services.vpn.loadbalancer.server.port=51821
+
+  # --- External uptime checks + status page ----------------------------------------
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: uptime-kuma
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - uptime-kuma-data:/app/data
+    networks:
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.status.rule=Host(`status.${DOMAIN}`)
+      - traefik.http.routers.status.entrypoints=websecure
+      - traefik.http.services.status.loadbalancer.server.port=3001
+
+  # --- Metrics ------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: prometheus
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    networks:
+      - monitoring
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: node-exporter
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      - --path.rootfs=/host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    networks:
+      - monitoring
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=30s
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_SERVER_ROOT_URL: https://grafana.${DOMAIN}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - proxy
+      - monitoring
+    depends_on:
+      - prometheus
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.grafana.rule=Host(`grafana.${DOMAIN}`)
+      - traefik.http.routers.grafana.entrypoints=websecure
+      - traefik.http.services.grafana.loadbalancer.server.port=3000

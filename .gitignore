@@ -1,0 +1,24 @@
+# Secrets: never commit these
+.env
+*.htpasswd
+*.pem
+id_*
+
+# Terraform (commit .terraform.lock.hcl, ignore state and local vars)
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+terraform.tfvars
+*.auto.tfvars
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

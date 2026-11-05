@@ -1,0 +1,11 @@
+#cloud-config
+# Rendered by Terraform. The bootstrap script is embedded as base64 so that
+# its contents never need YAML escaping.
+write_files:
+  - path: /root/bootstrap.sh
+    permissions: "0700"
+    encoding: b64
+    content: ${base64encode(bootstrap_script)}
+
+runcmd:
+  - [bash, -c, "DEPLOY_USER='${deploy_user}' SSH_PUBLIC_KEY='${ssh_public_key}' /root/bootstrap.sh >> /var/log/bootstrap.log 2>&1"]
