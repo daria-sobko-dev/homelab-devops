@@ -203,7 +203,7 @@ services:
       - monitoring
 
   grafana:
-    image: grafana/grafana:11.4.0
+    image: grafana/grafana:13.3.0
     container_name: grafana
     restart: unless-stopped
     logging: *default-logging
